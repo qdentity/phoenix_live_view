@@ -411,22 +411,14 @@ class EntryUploader {
   }
 }
 
-let serializeForm = (form, meta = {}) => {
-  let formData = new FormData(form)
-  let toRemove = []
+function getInputForm(input, customFormElements = []) {
+  for(let name of customFormElements || []) {
+    if(name.toUpperCase() == input.tagName) {
+      return input.closest("form")
+    }
+  }
 
-  formData.forEach((val, key, index) => {
-    if(val instanceof File){ toRemove.push(key) }
-  })
-
-  // Cleanup after building fileData
-  toRemove.forEach(key => formData.delete(key))
-
-  let params = new URLSearchParams()
-  for(let [key, val] of formData.entries()){ params.append(key, val) }
-  for(let metaKey in meta){ params.append(metaKey, meta[metaKey]) }
-
-  return params.toString()
+  return input.form
 }
 
 export class Rendered {
@@ -1222,7 +1214,9 @@ export class LiveSocket {
     for(let type of ["change", "input"]){
       this.on(type, e => {
         let input = e.target
-        let phxEvent = input.form && input.form.getAttribute(this.binding("change"))
+        const inputForm = getInputForm(input, this.opts.customFormElements)
+        if(!inputForm){ return }
+        let phxEvent = inputForm.getAttribute(this.binding("change"))
         if(!phxEvent){ return }
         if(input.type === "number" && input.validity && input.validity.badInput){ return }
         let currentIterations = iterations
@@ -1234,12 +1228,12 @@ export class LiveSocket {
         DOM.putPrivate(input, "prev-iteration", {at: currentIterations, type: type})
 
         this.debounce(input, e, () => {
-          this.withinOwners(input.form, (view, targetCtx) => {
+          this.withinOwners(inputForm, (view, targetCtx) => {
             DOM.putPrivate(input, PHX_HAS_FOCUSED, true)
             if(!DOM.isTextualInput(input)){
               this.setActiveElement(input)
             }
-            view.pushInput(input, targetCtx, phxEvent, e.target)
+            view.pushInput(input, inputForm, targetCtx, phxEvent, e.target)
           })
         })
       }, false)
@@ -1525,12 +1519,15 @@ export let DOM = {
     return currentCycle
   },
 
-  discardError(container, el, phxFeedbackFor){
+  discardError(container, el, phxFeedbackFor, customFormElements){
     let field = el.getAttribute && el.getAttribute(phxFeedbackFor)
     let input = field && container.querySelector(`#${field}`)
     if(!input){ return }
 
-    if(!(this.private(input, PHX_HAS_FOCUSED) || this.private(input.form, PHX_HAS_SUBMITTED))){
+    const inputForm = getInputForm(el, customFormElements)
+    if (!inputForm){ return }
+
+    if(!(this.private(input, PHX_HAS_FOCUSED) || this.private(inputForm, PHX_HAS_SUBMITTED))){
       el.classList.add(PHX_NO_FEEDBACK_CLASS)
     }
   },
@@ -1781,7 +1778,7 @@ class DOMPatch {
         childrenOnly: targetContainer.getAttribute(PHX_COMPONENT) === null,
         onBeforeNodeAdded: (el) => {
           //input handling
-          DOM.discardError(targetContainer, el, phxFeedbackFor)
+          DOM.discardError(targetContainer, el, phxFeedbackFor, this.liveSocket.opts.customFormElements)
           this.trackBefore("added", el)
           return el
         },
@@ -1842,7 +1839,7 @@ class DOMPatch {
 
           // input handling
           DOM.copyPrivates(toEl, fromEl)
-          DOM.discardError(targetContainer, toEl, phxFeedbackFor)
+          DOM.discardError(targetContainer, toEl, phxFeedbackFor, this.liveSocket.opts.customFormElements)
 
           let isFocusedFormEl = focused && fromEl.isSameNode(focused) && DOM.isFormInput(fromEl)
           if(isFocusedFormEl && !this.forceFocusedSelectUpdate(fromEl, toEl)){
@@ -2620,11 +2617,11 @@ export class View {
     })
   }
 
-  pushInput(inputEl, targetCtx, phxEvent, eventTarget, callback){
+  pushInput(inputEl, formEl, targetCtx, phxEvent, eventTarget, callback){
     let uploads
-    let cid = this.targetComponentID(inputEl.form, targetCtx)
-    let refGenerator = () => this.putRef([inputEl, inputEl.form], "change")
-    let formData = serializeForm(inputEl.form, {_target: eventTarget.name})
+    let cid = this.targetComponentID(formEl, targetCtx)
+    let refGenerator = () => this.putRef([inputEl, formEl], "change")
+    let formData = this.serializeForm(formEl, {_target: eventTarget.name})
     if(inputEl.files && inputEl.files.length > 0){
       LiveUploader.trackFiles(inputEl, Array.from(inputEl.files))
     }
@@ -2640,9 +2637,9 @@ export class View {
       if(inputEl.type === "file" && inputEl.getAttribute("data-phx-auto-upload") !== null){
         if(LiveUploader.filesAwaitingPreflight(inputEl).length > 0) {
           let [ref, els] = refGenerator()
-          this.uploadFiles(inputEl.form, targetCtx, ref, cid, (uploads) => {
+          this.uploadFiles(formEl, targetCtx, ref, cid, (uploads) => {
             callback && callback(resp)
-            this.triggerAwaitingSubmit(inputEl.form)
+            this.triggerAwaitingSubmit(formEl)
           })
         }
       } else {
@@ -2714,7 +2711,7 @@ export class View {
       let [ref, els] = refGenerator()
       let proxyRefGen = () => [ref, els]
       this.uploadFiles(formEl, targetCtx, ref, cid, (uploads) => {
-        let formData = serializeForm(formEl, {})
+        let formData = this.serializeForm(formEl, {})
         this.pushWithReply(proxyRefGen, "event", {
           type: "form",
           event: phxEvent,
@@ -2723,7 +2720,7 @@ export class View {
         }, onReply)
       })
     } else {
-      let formData = serializeForm(formEl)
+      let formData = this.serializeForm(formEl)
       this.pushWithReply(refGenerator, "event", {
         type: "form",
         event: phxEvent,
@@ -2773,7 +2770,7 @@ export class View {
     this.liveSocket.withinOwners(form, (view, targetCtx) => {
       let input = form.elements[0]
       let phxEvent = form.getAttribute(this.binding(PHX_AUTO_RECOVER)) || form.getAttribute(this.binding("change"))
-      view.pushInput(input, targetCtx, phxEvent, input, callback)
+      view.pushInput(input, form, targetCtx, phxEvent, input, callback)
     })
   }
 
@@ -2849,6 +2846,32 @@ export class View {
   }
 
   binding(kind){ return this.liveSocket.binding(kind)}
+
+  serializeForm(form, meta = {}) {
+    let formData = new FormData(form)
+    let toRemove = []
+
+    formData.forEach((val, key, index) => {
+      if(val instanceof File){ toRemove.push(key) }
+    })
+
+    // Cleanup after building fileData
+    toRemove.forEach(key => formData.delete(key))
+
+    let params = new URLSearchParams()
+    for(let [key, val] of formData.entries()){ params.append(key, val) }
+    for(let metaKey in meta){ params.append(metaKey, meta[metaKey]) }
+    if (this.liveSocket.opts.customFormElements) {
+      const selector = this.liveSocket.opts.customFormElements.join(",")
+      for(let el of form.querySelectorAll(selector)) {
+        if(typeof el.name !== "string" || typeof el.value !== "string") {
+          continue
+        }
+        params.append(el.name, el.value)
+      }
+    }
+    return params.toString()
+  }
 }
 
 let viewHookID = 1
